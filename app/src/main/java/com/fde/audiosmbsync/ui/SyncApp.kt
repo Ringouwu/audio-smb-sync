@@ -2,121 +2,54 @@ package com.fde.audiosmbsync.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.tooling.preview.Preview
-import com.fde.audiosmbsync.data.UploadStatus
+import com.fde.audiosmbsync.data.*
 import com.fde.audiosmbsync.viewmodel.SyncViewModel
-import java.text.DateFormat
-import java.util.Date
+import java.time.LocalDate
+import java.time.ZoneId
 
-@Composable
-fun SyncApp(viewModel: SyncViewModel) {
-    val config by viewModel.config.collectAsState()
-    val recordings by viewModel.recordings.collectAsState()
-    var deviceCode by remember(config) { mutableStateOf(config?.deviceCode.orEmpty()) }
-    var host by remember(config) { mutableStateOf(config?.smbHost.orEmpty()) }
-    var share by remember(config) { mutableStateOf(config?.shareName.orEmpty()) }
-    var username by remember(config) { mutableStateOf(config?.username.orEmpty()) }
-    var password by remember { mutableStateOf("") }
-    var selectedTree by remember(config) { mutableStateOf(config?.recordingTreeUri.orEmpty()) }
-    var message by remember { mutableStateOf("") }
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { selectedTree = it.toString() }
-    }
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("录音 SMB 同步", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall) }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("首次设置")
-                OutlinedTextField(deviceCode, { deviceCode = it }, label = { Text("设备编码，例如 XS001") }, modifier = Modifier.fillMaxWidth())
-                Button(onClick = { folderPicker.launch(null) }) { Text(if (selectedTree.isBlank()) "选择录音文件夹" else "已选择录音文件夹") }
-                OutlinedTextField(host, { host = it }, label = { Text("MacBook IP，例如 192.168.1.20") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(share, { share = it }, label = { Text("共享文件夹名") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(username, { username = it }, label = { Text("SMB 用户名") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(password, { password = it }, label = { Text("SMB 密码（留空不修改）") }, modifier = Modifier.fillMaxWidth())
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.save(deviceCode, selectedTree.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse), host, share, username, password); message = "配置已保存" }) { Text("保存") }
-                    Button(onClick = { viewModel.testConnection { message = it } }) { Text("测试连接") }
-                }
-                if (message.isNotBlank()) Text(message)
-            } }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                val uploaded = recordings.count { it.status == UploadStatus.UPLOADED }
-                val pending = recordings.count { it.status != UploadStatus.UPLOADED }
-                Text("同步状态")
-                Text("已上传 $uploaded 个，待处理/失败 $pending 个")
-                Text("最近同步：${config?.lastSyncAt?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "尚未执行"}")
-                Button(onClick = { viewModel.syncNow(); message = "已加入同步队列" }) { Text("立即同步") }
-            } }
-        }
-        item { Text("录音队列") }
-        items(recordings, key = { it.id }) { recording ->
-            Column(Modifier.fillMaxWidth()) {
-                Text(recording.targetName)
-                Text("${recording.status}  ${recording.lastError ?: ""}", style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-            }
-        }
+@Composable fun SyncApp(viewModel: SyncViewModel) {
+    val stored by viewModel.config.collectAsState(); val hosts by viewModel.discoveredHosts.collectAsState(); val shares by viewModel.availableShares.collectAsState(); val dirs by viewModel.availableDirectories.collectAsState(); val candidates by viewModel.folderCandidates.collectAsState(); val runs by viewModel.syncRuns.collectAsState(); val scanning by viewModel.isScanningNetwork.collectAsState()
+    var deviceName by remember(stored){mutableStateOf(stored?.deviceName.orEmpty())}; var host by remember(stored){mutableStateOf(stored?.smbHost.orEmpty())}; var share by remember(stored){mutableStateOf(stored?.shareName.orEmpty())}; var subPath by remember(stored){mutableStateOf(stored?.smbSubPath.orEmpty())}; var auth by remember(stored){mutableStateOf(stored?.authMode?:SmbAuthMode.GUEST)}; var user by remember(stored){mutableStateOf(stored?.username.orEmpty())}; var pass by remember{mutableStateOf("")}; var recordingUri by remember(stored){mutableStateOf(stored?.recordingTreeUri.orEmpty())}; var createFolder by remember(stored){mutableStateOf(stored?.createDeviceSubfolder?:false)}; var rename by remember(stored){mutableStateOf(stored?.renameOnUpload?:true)}; var verify by remember(stored){mutableStateOf(stored?.verificationMode?:VerificationMode.SIZE_ONLY)}; var range by remember(stored){mutableStateOf(stored?.syncRange?:SyncRange.ALL)}; var days by remember(stored){mutableStateOf((stored?.recentDays?:7).toString())}; var startDate by remember{mutableStateOf("")}; var autoSync by remember(stored){mutableStateOf(stored?.autoSyncEnabled?:true)}; var schedule by remember(stored){mutableStateOf(stored?.syncScheduleMode?:SyncScheduleMode.DAILY)}; var hour by remember(stored){mutableStateOf((stored?.dailySyncHour?:2).toString())}; var minute by remember(stored){mutableStateOf((stored?.dailySyncMinute?:0).toString())}; var interval by remember(stored){mutableStateOf((stored?.intervalMinutes?:1440).toString())}; var delay by remember{mutableStateOf("30")}; var message by remember{mutableStateOf("")}
+    fun config()=AppConfig(deviceName=deviceName.trim(),recordingTreeUri=recordingUri,smbHost=host.trim(),shareName=share,smbSubPath=subPath.trim('/'),authMode=auth,username=user.trim(),createDeviceSubfolder=createFolder,renameOnUpload=rename,verificationMode=verify,syncRange=range,recentDays=days.toIntOrNull()?:7,customStartAt=runCatching{LocalDate.parse(startDate).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()}.getOrNull(),autoSyncEnabled=autoSync,syncScheduleMode=schedule,dailySyncHour=hour.toIntOrNull()?:2,dailySyncMinute=minute.toIntOrNull()?:0,intervalMinutes=interval.toLongOrNull()?:1440,lastSyncAt=stored?.lastSyncAt)
+    val manualPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()){it?.let{recordingUri=it.toString();message="已选择录音目录"}}
+    val scanPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()){it?.let{viewModel.scanRecordingFolders(it){m->message=m}}}
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+        item { Text("录音 SMB 同步",style=MaterialTheme.typography.headlineSmall) }
+        item { Card { Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text("本地录音目录",style=MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Button(onClick={manualPicker.launch(null)}){Text(if(recordingUri.isBlank())"手动选择" else "已选择")};Button(onClick={scanPicker.launch(null)}){Text("扫描录音文件夹")}}
+            candidates.forEach { c->Button(onClick={recordingUri=c.uri;message="已使用：${c.name}"},modifier=Modifier.fillMaxWidth()){Text("使用 ${c.name}（${c.audioCount} 个音频）")}}
+        }}}
+        item { Card { Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) { Text("自动同步",style=MaterialTheme.typography.titleMedium);Toggle("开启自动同步",autoSync){autoSync=it};if(autoSync){Row{RadioButton(schedule==SyncScheduleMode.DAILY,{schedule=SyncScheduleMode.DAILY});Text("每天");RadioButton(schedule==SyncScheduleMode.INTERVAL,{schedule=SyncScheduleMode.INTERVAL});Text("每隔")};if(schedule==SyncScheduleMode.DAILY){OutlinedTextField(hour,{hour=it},label={Text("时")});OutlinedTextField(minute,{minute=it},label={Text("分")})}else OutlinedTextField(interval,{interval=it},label={Text("间隔分钟，至少15")})};OutlinedTextField(delay,{delay=it},label={Text("延后同步分钟")});Button(onClick={viewModel.syncAfter(delay.toLongOrNull()?:0);message="已加入延后同步"}){Text("延后同步")}}}}
+        item { Card { Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text("SMB 服务器与目录",style=MaterialTheme.typography.titleMedium)
+            OutlinedTextField(host,{host=it},label={Text("服务器 IP（可扫描或手动填写）")},modifier=Modifier.fillMaxWidth())
+            Button(onClick={viewModel.scanLocalNetwork{message=it}},enabled=!scanning){Text(if(scanning)"正在扫描…" else "扫描同网段 SMB 服务")}
+            hosts.forEach{ip->OutlinedButton(onClick={host=ip}){Text("选择 $ip")}}
+            Row(verticalAlignment=Alignment.CenterVertically){RadioButton(auth==SmbAuthMode.GUEST,{auth=SmbAuthMode.GUEST});Text("访客模式") ; RadioButton(auth==SmbAuthMode.PASSWORD,{auth=SmbAuthMode.PASSWORD});Text("账号密码")}
+            if(auth==SmbAuthMode.PASSWORD){OutlinedTextField(user,{user=it},label={Text("用户名")},modifier=Modifier.fillMaxWidth());OutlinedTextField(pass,{pass=it},label={Text("密码")},modifier=Modifier.fillMaxWidth())}
+            Button(onClick={viewModel.loadShares(config(),pass){message=it}}){Text("连接并获取共享文件夹")}
+            if(shares.isNotEmpty()){Text("选择共享文件夹");shares.forEach{s->OutlinedButton(onClick={share=s;subPath="";viewModel.loadDirectories(config(),pass,""){message=it}}){Text(s)}}}
+            if(share.isNotBlank()){Text("当前输出目录：/$share/${subPath}");if(subPath.isNotBlank())OutlinedButton(onClick={subPath=subPath.substringBeforeLast("/","");viewModel.loadDirectories(config(),pass,subPath){message=it}}){Text("返回上级目录")}; dirs.forEach{d->OutlinedButton(onClick={subPath=listOf(subPath,d).filter{it.isNotBlank()}.joinToString("/");viewModel.loadDirectories(config(),pass,subPath){message=it}}){Text("进入 $d")}};Button(onClick={viewModel.testSelectedShare(config(),pass){message=it}}){Text("验证当前输出目录可写")}}
+        }}}
+        item { Card { Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text("命名与同步范围",style=MaterialTheme.typography.titleMedium);OutlinedTextField(deviceName,{deviceName=it},label={Text("设备名称（可选子文件夹名）")},modifier=Modifier.fillMaxWidth());Toggle("在输出目录创建设备名称文件夹",createFolder){createFolder=it};Toggle("统一命名上传",rename){rename=it};Text("统一命名：原文件名有唯一11位手机号时，使用 手机号_文件修改时间；否则保留原文件名")
+            Row{RadioButton(range==SyncRange.ALL,{range=SyncRange.ALL});Text("全部");RadioButton(range==SyncRange.RECENT_DAYS,{range=SyncRange.RECENT_DAYS});Text("最近天数");RadioButton(range==SyncRange.CUSTOM_START,{range=SyncRange.CUSTOM_START});Text("开始日期")}
+            if(range==SyncRange.RECENT_DAYS)OutlinedTextField(days,{days=it},label={Text("最近 N 天")},modifier=Modifier.fillMaxWidth());if(range==SyncRange.CUSTOM_START)OutlinedTextField(startDate,{startDate=it},label={Text("开始日期 yyyy-MM-dd")},modifier=Modifier.fillMaxWidth())
+            Toggle("严格复核（SHA-256）",verify==VerificationMode.SHA256){verify=if(it)VerificationMode.SHA256 else VerificationMode.SIZE_ONLY}
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Button(onClick={viewModel.save(config(),pass,null){message=it}}){Text("保存")};Button(onClick={viewModel.syncNow();message="已加入同步队列"}){Text("立即同步")}}
+        }}}
+        item { if(message.isNotBlank()) Text(message) }
+        item { Text("最近同步日志",style=MaterialTheme.typography.titleMedium) }
+        items(runs){r->Text("${r.status}｜扫描${r.scannedCount} 上传${r.uploadedCount} 失败${r.failedCount}",style=MaterialTheme.typography.bodySmall)}
     }
 }
-
-/** Android Studio Design 预览入口：不访问 SMB、数据库或手机录音目录。 */
-@Preview(showBackground = true, widthDp = 390, heightDp = 840)
-@Composable
-private fun SyncAppPreview() {
-    androidx.compose.material3.MaterialTheme {
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { Text("录音 SMB 同步", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall) }
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("首次设置")
-                        OutlinedTextField("XS001", {}, label = { Text("设备编码") }, modifier = Modifier.fillMaxWidth())
-                        Button(onClick = {}) { Text("已选择录音文件夹") }
-                        OutlinedTextField("192.168.1.20", {}, label = { Text("MacBook IP") }, modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField("AudioUploads", {}, label = { Text("共享文件夹名") }, modifier = Modifier.fillMaxWidth())
-                    }
-                }
-            }
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("同步状态")
-                        Text("已上传 12 个，待处理/失败 1 个")
-                        Text("最近同步：2026/7/16 02:05")
-                        Button(onClick = {}) { Text("立即同步") }
-                    }
-                }
-            }
-            item { Text("录音队列") }
-            item {
-                Column(Modifier.fillMaxWidth()) {
-                    Text("XS00120260716_020530.mp3")
-                    Text("UPLOADED", style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-}
+@Composable private fun Toggle(label:String,checked:Boolean,onChange:(Boolean)->Unit){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(label,Modifier.weight(1f));Switch(checked,onChange)}}
