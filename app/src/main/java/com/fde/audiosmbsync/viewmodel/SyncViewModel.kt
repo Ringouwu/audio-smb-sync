@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkManager
@@ -80,6 +81,25 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             "已获得录音文件夹访问权限"
         }.getOrElse { "录音文件夹授权失败：${it.message ?: it.javaClass.simpleName}" } }
         recordEvent(result, if (result.startsWith("已获得")) "INFO" else "ERROR")
+        onResult(result)
+    }
+
+    fun validateRecordingFolder(treeUri: String, relativePath: String, onResult: (String) -> Unit) = viewModelScope.launch {
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                require(treeUri.isNotBlank()) { "请先选择录音文件夹" }
+                var folder = DocumentFile.fromTreeUri(getApplication(), Uri.parse(treeUri))
+                    ?: error("无法打开所选文件夹，请重新选择")
+                relativePath.trim('/').split('/').filter { it.isNotBlank() }.forEach { segment ->
+                    folder = folder.listFiles().firstOrNull { it.isDirectory && it.name == segment }
+                        ?: error("已选择的录音子目录不存在，请重新选择")
+                }
+                require(folder.canRead()) { "App 没有该文件夹的读取权限，请重新授权" }
+                val fileCount = folder.listFiles().count { it.isFile }
+                "录音文件夹可用：发现 $fileCount 个文件"
+            }.getOrElse { "录音文件夹验证失败：${it.message ?: it.javaClass.simpleName}" }
+        }
+        recordEvent(result, if (result.startsWith("录音文件夹可用")) "INFO" else "ERROR")
         onResult(result)
     }
 
