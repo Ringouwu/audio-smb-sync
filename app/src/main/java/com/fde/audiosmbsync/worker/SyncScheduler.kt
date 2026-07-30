@@ -1,5 +1,6 @@
 package com.fde.audiosmbsync.worker
 
+import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -14,8 +15,10 @@ import java.time.Duration
 import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 
 object SyncScheduler {
+    private const val TAG = "AudioSmbSync.WORKER"
     private const val PERIODIC_NAME = "audio_sync_periodic"
     private const val DELAYED_NAME = "audio_sync_delayed"
     private fun constraints() = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
@@ -38,14 +41,17 @@ object SyncScheduler {
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
         workManager.enqueueUniquePeriodicWork(PERIODIC_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+        Log.i(TAG, "event=periodic_work_scheduled work_id=${request.id} interval_minutes=$intervalMinutes initial_delay_minutes=$initialDelayMinutes")
     }
 
-    fun scheduleOnce(workManager: WorkManager, delayMinutes: Long = 0) {
+    fun scheduleOnce(workManager: WorkManager, delayMinutes: Long = 0): UUID {
         val request = OneTimeWorkRequestBuilder<DailySyncWorker>()
             .setInitialDelay(delayMinutes.coerceAtLeast(0), TimeUnit.MINUTES)
             .setConstraints(constraints())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
         workManager.enqueueUniqueWork(DELAYED_NAME, ExistingWorkPolicy.REPLACE, request)
+        Log.i(TAG, "event=one_time_work_enqueued work_id=${request.id} delay_minutes=$delayMinutes")
+        return request.id
     }
 }

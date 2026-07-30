@@ -2,6 +2,7 @@ package com.fde.audiosmbsync.smb
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import com.fde.audiosmbsync.data.AppConfig
 import com.fde.audiosmbsync.data.SmbAuthMode
 import com.fde.audiosmbsync.data.VerificationMode
@@ -14,6 +15,7 @@ import java.security.MessageDigest
 import java.util.Properties
 
 class SmbUploader(private val context: Context) {
+    companion object { private const val TAG = "AudioSmbSync.SMB" }
     private fun smbContext(config: AppConfig, password: String): CIFSContext {
         val properties = Properties().apply {
             setProperty("jcifs.smb.client.minVersion", "SMB202")
@@ -43,8 +45,16 @@ class SmbUploader(private val context: Context) {
     fun listShares(config: AppConfig, password: String): List<String> {
         val host = normalizedHost(config)
         require(host.isNotBlank() && !host.contains('/')) { "服务器地址只能填写 IP 或主机名" }
-        val server = SmbFile("smb://$host/", smbContext(config, password))
-        return server.listFiles().filter { it.isDirectory }.map { it.name.trimEnd('/') }.sorted()
+        return try {
+            Log.i(TAG, "event=list_shares_start host=$host auth=${config.authMode}")
+            val server = SmbFile("smb://$host/", smbContext(config, password))
+            server.listFiles().filter { it.isDirectory }.map { it.name.trimEnd('/') }.sorted().also {
+                Log.i(TAG, "event=list_shares_success host=$host count=${it.size}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "event=list_shares_failed host=$host type=${e.javaClass.simpleName}", e)
+            throw e
+        }
     }
 
     fun listDirectories(config: AppConfig, password: String, relativePath: String = ""): List<String> {
@@ -75,27 +85,56 @@ class SmbUploader(private val context: Context) {
     }
 
     fun test(config: AppConfig, password: String) {
-        val directory = destination(config, password)
-        val probe = SmbFile(directory, ".audio-sync-probe-${System.currentTimeMillis()}")
-        probe.outputStream.use { it.write("ok".toByteArray()) }
-        require(probe.exists() && probe.length() == 2L) { "测试文件写入校验失败" }
-        probe.delete()
+        try {
+            Log.i(TAG, "event=write_test_start host=${normalizedHost(config)} share=${config.shareName} sub_path=${config.smbSubPath}")
+            val directory = destination(config, password)
+            val probe = SmbFile(directory, ".audio-sync-probe-${System.currentTimeMillis()}")
+            probe.outputStream.use { it.write("ok".toByteArray()) }
+            require(probe.exists() && probe.length() == 2L) { "测试文件写入校验失败" }
+            probe.delete()
+            Log.i(TAG, "event=write_test_success host=${normalizedHost(config)} share=${config.shareName}")
+        } catch (e: Exception) {
+            Log.e(TAG, "event=write_test_failed host=${normalizedHost(config)} share=${config.shareName} type=${e.javaClass.simpleName}", e)
+            throw e
+        }
     }
 
-    fun upload(config: AppConfig, password: String, sourceUri: String, targetName: String, expectedSize: Long, expectedFingerprint: String, targetDirectory: String) {
+    suspend fun upload(config: AppConfig, password: String, sourceUri: String, targetName: String, expectedSize: Long, expectedFingerprint: String, targetDirectory: String, onProgress: suspend (Int) -> Unit = {}) {
+        try {
+        Log.i(TAG, "event=upload_start host=${normalizedHost(config)} share=${config.shareName} directory=$targetDirectory target=$targetName bytes=$expectedSize verification=${config.verificationMode}")
         val directory = destination(config, password, targetDirectory)
         val finalFile = SmbFile(directory, pathSegment(targetName))
-        if (finalFile.exists() && finalFile.length() == expectedSize && verified(finalFile, expectedFingerprint, config.verificationMode)) return
+        if (finalFile.exists() && finalFile.length() == expectedSize && verified(finalFile, expectedFingerprint, config.verificationMode)) {
+            Log.i(TAG, "event=upload_already_verified target=$targetName bytes=$expectedSize")
+            return
+        }
         val tempFile = SmbFile(directory, "${pathSegment(targetName)}.uploading")
         if (tempFile.exists()) tempFile.delete()
         context.contentResolver.openInputStream(Uri.parse(sourceUri))?.use { input ->
-            tempFile.outputStream.use { output -> input.copyTo(output) }
+            tempFile.outputStream.use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var copied = 0L
+                var reported = -1
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    copied += count
+                    val percent = if (expectedSize > 0) ((copied * 100) / expectedSize).toInt().coerceIn(0, 100) else 0
+                    if (percent / 10 != reported / 10 || percent == 100) { reported = percent; Log.d(TAG, "event=upload_progress target=$targetName percent=$percent copied=$copied"); onProgress(percent) }
+                }
+            }
         } ?: error("无法读取本地录音")
         require(tempFile.length() == expectedSize) { "远端临时文件大小校验失败" }
         if (finalFile.exists()) finalFile.delete()
         tempFile.renameTo(finalFile)
         require(finalFile.exists() && finalFile.length() == expectedSize) { "正式文件校验失败" }
         require(verified(finalFile, expectedFingerprint, config.verificationMode)) { "远端文件 SHA-256 校验失败" }
+        Log.i(TAG, "event=upload_success target=$targetName bytes=$expectedSize")
+        } catch (e: Exception) {
+            Log.e(TAG, "event=upload_failed target=$targetName bytes=$expectedSize type=${e.javaClass.simpleName}", e)
+            throw e
+        }
     }
 
     private fun verified(file: SmbFile, expectedFingerprint: String, mode: VerificationMode): Boolean {

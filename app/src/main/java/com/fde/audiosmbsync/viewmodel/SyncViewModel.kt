@@ -3,9 +3,11 @@ package com.fde.audiosmbsync.viewmodel
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkManager
+import androidx.work.WorkInfo
 import com.fde.audiosmbsync.AudioSyncApplication
 import com.fde.audiosmbsync.data.AppConfig
 import com.fde.audiosmbsync.data.SmbAuthMode
@@ -26,15 +28,18 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 class SyncViewModel(application: Application) : AndroidViewModel(application) {
+    companion object { private const val TAG = "AudioSmbSync.WORKER" }
     private val app = application as AudioSyncApplication
     val config = app.database.configDao().observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val recordings = app.database.recordingDao().observeAll().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val syncRuns = app.database.syncLogDao().observeRuns().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val events = app.database.appEventDao().observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     private val _availableShares = MutableStateFlow<List<String>>(emptyList())
     val availableShares = _availableShares
     private val _discoveredHosts = MutableStateFlow<List<String>>(emptyList())
@@ -46,12 +51,10 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
     private val _folderCandidates = MutableStateFlow<List<FolderCandidate>>(emptyList())
     val folderCandidates = _folderCandidates
 
-    fun save(config: AppConfig, password: String, treeUri: Uri?, onResult: (String) -> Unit) = viewModelScope.launch {
+    fun save(config: AppConfig, password: String, onResult: (String) -> Unit) = viewModelScope.launch {
         val result = runCatching {
             require(config.smbHost.isNotBlank() && config.shareName.isNotBlank()) { "请选择服务器和目标共享文件夹" }
-            if (config.renameOnUpload) require(config.salesPhoneNumber.matches(Regex("\\d{11}"))) { "销售手机号必须为 11 位数字" }
             if (config.authMode == SmbAuthMode.PASSWORD) require(config.username.isNotBlank()) { "请填写 SMB 用户名" }
-            treeUri?.let { getApplication<Application>().contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             val old = withContext(Dispatchers.IO) { app.database.configDao().get() }
             val samePasswordTarget = old?.authMode == SmbAuthMode.PASSWORD &&
                 old.smbHost == config.smbHost && old.shareName == config.shareName && old.username == config.username
@@ -60,7 +63,6 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             }
             val encrypted = if (config.authMode == SmbAuthMode.PASSWORD && password.isNotBlank()) PasswordCipher.encrypt(password) else null
             val saved = config.copy(
-                recordingTreeUri = treeUri?.toString() ?: old?.recordingTreeUri.orEmpty(),
                 passwordCiphertext = encrypted?.ciphertext ?: if (config.authMode == SmbAuthMode.GUEST) "" else old?.passwordCiphertext.orEmpty(),
                 passwordIv = encrypted?.iv ?: if (config.authMode == SmbAuthMode.GUEST) "" else old?.passwordIv.orEmpty()
             )
@@ -68,6 +70,16 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             SyncScheduler.schedule(WorkManager.getInstance(getApplication()), saved)
             "配置已保存"
         }.getOrElse { it.message ?: it.javaClass.simpleName }
+        recordEvent(if (result == "配置已保存") "配置已保存" else "保存配置失败：$result", if (result == "配置已保存") "INFO" else "ERROR")
+        onResult(result)
+    }
+
+    fun selectManualRecordingFolder(uri: Uri, onResult: (String) -> Unit) = viewModelScope.launch {
+        val result = withContext(Dispatchers.IO) { runCatching {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            "已获得录音文件夹访问权限"
+        }.getOrElse { "录音文件夹授权失败：${it.message ?: it.javaClass.simpleName}" } }
+        recordEvent(result, if (result.startsWith("已获得")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -80,6 +92,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
                 if (shares.isEmpty()) "连接成功，但未发现可访问的共享文件夹" else "连接成功：请选择目标共享文件夹"
             }.getOrElse { "连接失败：${it.message ?: it.javaClass.simpleName}" }
         }
+        recordEvent(if (result.startsWith("连接成功")) "SMB 服务器已连接：${config.smbHost}" else result, if (result.startsWith("连接成功")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -91,6 +104,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
                 "目标共享文件夹可写入"
             }.getOrElse { "连接失败：${it.message ?: it.javaClass.simpleName}" }
         }
+        recordEvent(if (result.startsWith("目标共享")) "SMB 输出目录已验证可写：/${config.shareName}/${config.smbSubPath}" else result, if (result.startsWith("目标共享")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -99,6 +113,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             _availableDirectories.value = SmbUploader(getApplication()).listDirectories(config, resolvePassword(config, passwordInput), path)
             "已读取子目录"
         }.getOrElse { "读取目录失败：${it.message ?: it.javaClass.simpleName}" } }
+        recordEvent(result, if (result.startsWith("已读取")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -109,6 +124,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             _folderCandidates.value = found
             if (found.isEmpty()) "未发现符合特征的录音文件夹" else "发现 ${found.size} 个候选录音文件夹，请选择"
         }.getOrElse { "扫描失败：${it.message ?: it.javaClass.simpleName}" } }
+        recordEvent(result, if (result.startsWith("发现") || result.startsWith("未发现")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -138,6 +154,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
             }.getOrElse { "扫描失败：${it.message ?: it.javaClass.simpleName}" }
         }
         _isScanningNetwork.value = false
+        recordEvent(result, if (result.startsWith("扫描完成")) "INFO" else "ERROR")
         onResult(result)
     }
 
@@ -150,6 +167,26 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
         return PasswordCipher.decrypt(old!!.passwordCiphertext, old.passwordIv)
     }
 
-    fun syncNow() = SyncScheduler.scheduleOnce(WorkManager.getInstance(getApplication()))
-    fun syncAfter(delayMinutes: Long) = SyncScheduler.scheduleOnce(WorkManager.getInstance(getApplication()), delayMinutes)
+    fun recordEvent(message: String, level: String = "INFO") = viewModelScope.launch(Dispatchers.IO) {
+        app.database.appEventDao().add(com.fde.audiosmbsync.data.AppEvent(message = message, level = level))
+        app.database.appEventDao().prune()
+    }
+
+    fun syncNow() {
+        val workManager = WorkManager.getInstance(getApplication())
+        val workId = SyncScheduler.scheduleOnce(workManager)
+        Log.i(TAG, "event=manual_sync_enqueued work_id=$workId")
+        recordEvent("同步任务已加入队列，等待开始")
+        viewModelScope.launch {
+            delay(20_000)
+            val state = withContext(Dispatchers.IO) { workManager.getWorkInfoById(workId).get()?.state }
+            when (state) {
+                WorkInfo.State.ENQUEUED -> { Log.w(TAG, "event=manual_sync_still_enqueued work_id=$workId"); recordEvent("同步仍在等待：请检查手机网络是否可用，或稍后再试", "ERROR") }
+                WorkInfo.State.FAILED -> { Log.e(TAG, "event=manual_sync_failed work_id=$workId"); recordEvent("同步任务未能启动：请检查实时状态中的配置错误", "ERROR") }
+                WorkInfo.State.CANCELLED -> { Log.e(TAG, "event=manual_sync_cancelled work_id=$workId"); recordEvent("同步任务已被系统取消", "ERROR") }
+                else -> Unit
+            }
+        }
+    }
+    fun syncAfter(delayMinutes: Long) { SyncScheduler.scheduleOnce(WorkManager.getInstance(getApplication()), delayMinutes); recordEvent("延后 $delayMinutes 分钟同步已加入队列") }
 }

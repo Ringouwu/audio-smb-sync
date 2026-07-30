@@ -2,6 +2,7 @@ package com.fde.audiosmbsync.storage
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.fde.audiosmbsync.data.AppConfig
 import com.fde.audiosmbsync.data.Recording
@@ -11,22 +12,29 @@ import com.fde.audiosmbsync.data.SyncRange
 import java.security.MessageDigest
 
 class RecordingScanner(private val context: Context, private val dao: RecordingDao) {
-    private val supportedExtensions = setOf("mp3", "m4a", "amr", "aac", "wav", "ogg")
+    companion object { private const val TAG = "AudioSmbSync.SCAN" }
 
     data class ScanSummary(val discovered: Int, val skipped: Int)
 
     suspend fun scan(config: AppConfig): ScanSummary {
+        Log.i(TAG, "event=scan_start relative_path=${config.recordingRelativePath} range=${config.syncRange} rename=${config.renameOnUpload}")
         require(config.recordingTreeUri.isNotBlank()) { "请先选择录音目录" }
-        val root = DocumentFile.fromTreeUri(context, Uri.parse(config.recordingTreeUri)) ?: error("无法打开录音目录")
+        var root = DocumentFile.fromTreeUri(context, Uri.parse(config.recordingTreeUri)) ?: error("无法打开录音目录")
+        config.recordingRelativePath.trim('/').split('/').filter { it.isNotBlank() }.forEach { segment ->
+            root = root.listFiles().firstOrNull { it.isDirectory && it.name == segment } ?: error("已选择的录音文件夹不存在：${config.recordingRelativePath}")
+        }
         var discovered = 0; var skipped = 0
-        root.listFiles().filter { it.isFile && extensionOf(it.name) in supportedExtensions && inRange(it.lastModified(), config) }.forEach { file ->
+        val files = root.listFiles()
+        Log.i(TAG, "event=scan_directory_opened child_count=${files.size} relative_path=${config.recordingRelativePath}")
+        files.filter { it.isFile && inRange(it.lastModified(), config) }.forEach { file ->
             val sourceName = file.name ?: return@forEach
             val fingerprint = sha256(file.uri) ?: return@forEach
-            if (dao.byFingerprint(fingerprint) != null) { skipped++; return@forEach }
+            if (dao.byFingerprint(fingerprint) != null) { skipped++; Log.d(TAG, "event=scan_skip_duplicate source=$sourceName"); return@forEach }
             val extension = extensionOf(sourceName)
             val inheritedPhone = Regex("(?<!\\d)(1\\d{10})(?!\\d)").find(sourceName)?.groupValues?.get(1)
             val recordedAt = file.lastModified()
-            val target = if (config.renameOnUpload && inheritedPhone != null) "${inheritedPhone}_${RecordingTimeResolver.formatForUpload(recordedAt)}.$extension" else sourceName
+            val extensionSuffix = extension.takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
+            val target = if (config.renameOnUpload && inheritedPhone != null) "${inheritedPhone}_${RecordingTimeResolver.formatForUpload(recordedAt)}$extensionSuffix" else sourceName
             val baseDirectory = config.smbSubPath.trim('/')
             val targetDirectory = listOf(baseDirectory, if (config.createDeviceSubfolder) config.deviceName.trim() else "").filter { it.isNotBlank() }.joinToString("/")
             if (dao.byTargetName(target, targetDirectory) != null) {
@@ -37,6 +45,7 @@ class RecordingScanner(private val context: Context, private val dao: RecordingD
                     lastError = "命名冲突：同一目标目录已有同名录音，请人工处理"
                 ))
                 discovered++
+                Log.w(TAG, "event=scan_name_conflict source=$sourceName target=$target directory=$targetDirectory")
                 return@forEach
             }
             dao.insert(Recording(
@@ -45,7 +54,9 @@ class RecordingScanner(private val context: Context, private val dao: RecordingD
                 targetName = target, targetDirectory = targetDirectory
             ))
             discovered++
+            Log.d(TAG, "event=scan_record_queued source=$sourceName target=$target bytes=${file.length()}")
         }
+        Log.i(TAG, "event=scan_complete discovered=$discovered skipped=$skipped")
         return ScanSummary(discovered, skipped)
     }
 
