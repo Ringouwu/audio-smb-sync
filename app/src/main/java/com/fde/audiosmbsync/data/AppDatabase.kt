@@ -19,7 +19,7 @@ enum class SyncItemResult { UPLOADED, SKIPPED, FAILED }
 data class AppConfig(
     @PrimaryKey val id: Int = 1,
     val deviceCode: String = "", val salesPhoneNumber: String = "", // v1/v2 legacy only
-    val deviceName: String = "", val recordingTreeUri: String = "", val smbHost: String = "",
+    val deviceName: String = "", val recordingTreeUri: String = "", val recordingRelativePath: String = "", val smbHost: String = "",
     val shareName: String = "", val smbSubPath: String = "", val authMode: SmbAuthMode = SmbAuthMode.PASSWORD,
     val username: String = "", val passwordCiphertext: String = "", val passwordIv: String = "",
     val createDeviceSubfolder: Boolean = false, val renameOnUpload: Boolean = true,
@@ -55,6 +55,14 @@ data class SyncRunItem(
     val reason: String? = null, val processedAt: Long
 )
 
+@Entity(tableName = "app_events")
+data class AppEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val createdAt: Long = System.currentTimeMillis(),
+    val message: String,
+    val level: String = "INFO"
+)
+
 class Converters {
     @TypeConverter fun status(v: String) = UploadStatus.valueOf(v); @TypeConverter fun status(v: UploadStatus) = v.name
     @TypeConverter fun auth(v: String) = SmbAuthMode.valueOf(v); @TypeConverter fun auth(v: SmbAuthMode) = v.name
@@ -84,14 +92,21 @@ class Converters {
     @Query("DELETE FROM sync_runs WHERE startedAt < :cutoff") suspend fun pruneRuns(cutoff:Long)
     @Query("DELETE FROM sync_runs WHERE id NOT IN (SELECT id FROM sync_runs ORDER BY startedAt DESC LIMIT 1000)") suspend fun pruneCount()
 }
+@Dao interface AppEventDao {
+    @Insert suspend fun add(event: AppEvent)
+    @Query("SELECT * FROM app_events ORDER BY createdAt DESC LIMIT 60") fun observe(): Flow<List<AppEvent>>
+    @Query("DELETE FROM app_events WHERE id NOT IN (SELECT id FROM app_events ORDER BY createdAt DESC LIMIT 200)") suspend fun prune()
+}
 
-@Database(entities=[AppConfig::class,Recording::class,SyncRun::class,SyncRunItem::class],version=3,exportSchema=true)
+@Database(entities=[AppConfig::class,Recording::class,SyncRun::class,SyncRunItem::class,AppEvent::class],version=5,exportSchema=true)
 @TypeConverters(Converters::class)
 abstract class AppDatabase: RoomDatabase() {
-    abstract fun configDao():AppConfigDao; abstract fun recordingDao():RecordingDao; abstract fun syncLogDao():SyncLogDao
+    abstract fun configDao():AppConfigDao; abstract fun recordingDao():RecordingDao; abstract fun syncLogDao():SyncLogDao; abstract fun appEventDao():AppEventDao
     companion object {
         private val M1_2=object:Migration(1,2){override fun migrate(db:SupportSQLiteDatabase){ val cols=listOf("salesPhoneNumber TEXT NOT NULL DEFAULT ''","deviceName TEXT NOT NULL DEFAULT ''","authMode TEXT NOT NULL DEFAULT 'PASSWORD'","createDeviceSubfolder INTEGER NOT NULL DEFAULT 0","renameOnUpload INTEGER NOT NULL DEFAULT 1","customFilenameRegex TEXT NOT NULL DEFAULT ''","allowModifiedTimeFallback INTEGER NOT NULL DEFAULT 0","verificationMode TEXT NOT NULL DEFAULT 'SIZE_ONLY'","autoSyncEnabled INTEGER NOT NULL DEFAULT 1","syncScheduleMode TEXT NOT NULL DEFAULT 'DAILY'","dailySyncHour INTEGER NOT NULL DEFAULT 2","dailySyncMinute INTEGER NOT NULL DEFAULT 0","intervalMinutes INTEGER NOT NULL DEFAULT 1440"); cols.forEach{db.execSQL("ALTER TABLE app_config ADD COLUMN $it")}; db.execSQL("ALTER TABLE recordings ADD COLUMN recordedAtSource TEXT NOT NULL DEFAULT 'FILENAME'");db.execSQL("ALTER TABLE recordings ADD COLUMN targetDirectory TEXT NOT NULL DEFAULT ''")}}
         private val M2_3=object:Migration(2,3){override fun migrate(db:SupportSQLiteDatabase){ db.execSQL("ALTER TABLE app_config ADD COLUMN smbSubPath TEXT NOT NULL DEFAULT ''");db.execSQL("ALTER TABLE app_config ADD COLUMN syncRange TEXT NOT NULL DEFAULT 'ALL'");db.execSQL("ALTER TABLE app_config ADD COLUMN recentDays INTEGER NOT NULL DEFAULT 7");db.execSQL("ALTER TABLE app_config ADD COLUMN customStartAt INTEGER");db.execSQL("CREATE TABLE IF NOT EXISTS sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,startedAt INTEGER NOT NULL,finishedAt INTEGER,range TEXT NOT NULL,scannedCount INTEGER NOT NULL,skippedCount INTEGER NOT NULL,uploadedCount INTEGER NOT NULL,failedCount INTEGER NOT NULL,status TEXT NOT NULL,error TEXT)");db.execSQL("CREATE TABLE IF NOT EXISTS sync_run_items (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,runId INTEGER NOT NULL,recordingId INTEGER,sourceName TEXT NOT NULL,targetName TEXT NOT NULL,result TEXT NOT NULL,reason TEXT,processedAt INTEGER NOT NULL)")}}
-        fun create(context:Context)=Room.databaseBuilder(context,AppDatabase::class.java,"audio-sync.db").addMigrations(M1_2,M2_3).build()
+        private val M3_4=object:Migration(3,4){override fun migrate(db:SupportSQLiteDatabase){db.execSQL("CREATE TABLE IF NOT EXISTS app_events (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,createdAt INTEGER NOT NULL,message TEXT NOT NULL,level TEXT NOT NULL)")}}
+        private val M4_5=object:Migration(4,5){override fun migrate(db:SupportSQLiteDatabase){db.execSQL("ALTER TABLE app_config ADD COLUMN recordingRelativePath TEXT NOT NULL DEFAULT ''")}}
+        fun create(context:Context)=Room.databaseBuilder(context,AppDatabase::class.java,"audio-sync.db").addMigrations(M1_2,M2_3,M3_4,M4_5).build()
     }
 }
